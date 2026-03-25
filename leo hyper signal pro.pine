@@ -1,0 +1,260 @@
+//@version=5
+// ─────────────────────────────
+// 🚀 Leo524 Hyper Signal
+// Multi-Factor Momentum & Trend Indicator
+// Author: Leo524
+// Precision • No Repaint • Optimized
+// ─────────────────────────────
+indicator("Leo524-Hyper-Signal-Pro", overlay=true, max_labels_count=500, max_boxes_count=500, max_bars_back=1000)
+
+// ── Visual & UI
+grp_ui = "Visuals & UI"
+leo_dashFontStr  = input.string("small", "Dashboard Font Size", options=["tiny", "small", "normal", "large", "huge"], group=grp_ui, display=display.data_window)
+leo_tradeFontStr = input.string("small", "Trade Label Size", options=["tiny", "small", "normal", "large", "huge"], group=grp_ui, display=display.data_window)
+leo_ribbonAlpha  = input.int(75, "EMA Ribbon Opacity", minval=0, maxval=100, group=grp_ui)
+leo_rightBars    = input.int(12, "Label Right Offset (Bars)", minval=1, group=grp_ui)
+
+// ── Risk
+grp_risk = "Risk Management"
+leo_atrMult = input.float(1.5, "SL ATR Multiplier", minval=0.1, step=0.1, group=grp_risk)
+
+// ── Helper: map string size to Pine size enum
+leo_mapSize(_v) =>
+    _v == "tiny" ? size.tiny :
+     _v == "small" ? size.small :
+     _v == "normal" ? size.normal :
+     _v == "large" ? size.large :
+     _v == "huge" ? size.huge : size.small
+
+leo_dashSize  = leo_mapSize(leo_dashFontStr)
+leo_tradeSize = leo_mapSize(leo_tradeFontStr)
+
+// ── Helper: table row (left title + right value)
+leo_putRow(_tbl, _row, _title, _value, _col) =>
+    table.cell(_tbl, 0, _row, _title, text_color=color.black, text_halign=text.align_left, text_size=leo_dashSize)
+    table.cell(_tbl, 1, _row, _value, text_color=_col, text_size=leo_dashSize, text_halign=text.align_right)
+
+// ── Constants
+leo_turq = #40E0D0
+
+// ── Core signals (same calculations)
+leo_emaFast = ta.ema(close, 9)
+leo_emaSlow = ta.ema(close, 21)
+leo_vwap    = ta.vwap(hlc3)
+leo_atr     = ta.atr(14)
+leo_rsi14   = ta.rsi(close, 14)
+leo_rsi5m   = request.security(syminfo.tickerid, "5", ta.rsi(close, 14))
+
+[leo_macdMain, leo_macdSig, _] = ta.macd(close, 12, 26, 9)
+[_, _, leo_adx] = ta.dmi(14, 14)
+leo_volAvg = ta.sma(volume, 20)
+
+// ── Scoring (7 conditions each side)
+float smart_bScore = 0.0
+smart_bScore += (close > leo_vwap ? 1 : 0)
+smart_bScore += (leo_rsi14 > 50 ? 1 : 0)
+smart_bScore += (leo_macdMain > leo_macdSig ? 1 : 0)
+smart_bScore += (leo_emaFast > leo_emaSlow ? 1 : 0)
+smart_bScore += (leo_adx > 25 and close > leo_emaFast ? 1 : 0)
+smart_bScore += (volume > leo_volAvg and close > open ? 1 : 0)
+smart_bScore += (leo_rsi5m > 50 ? 1 : 0)
+
+float smart_rScore = 0.0
+smart_rScore += (close < leo_vwap ? 1 : 0)
+smart_rScore += (leo_rsi14 < 50 ? 1 : 0)
+smart_rScore += (leo_macdMain < leo_macdSig ? 1 : 0)
+smart_rScore += (leo_emaFast < leo_emaSlow ? 1 : 0)
+smart_rScore += (leo_adx > 25 and close < leo_emaFast ? 1 : 0)
+smart_rScore += (volume > leo_volAvg and close < open ? 1 : 0)
+smart_rScore += (leo_rsi5m < 50 ? 1 : 0)
+
+float smart_bPct = (smart_bScore / 7.0) * 100.0
+float smart_rPct = (smart_rScore / 7.0) * 100.0
+
+// ── Market bias
+string smart_biasTxt =
+     (smart_bPct - smart_rPct) >= 40 ? "STRONG BULL" :
+     (smart_rPct - smart_bPct) >= 40 ? "STRONG BEAR" :
+     smart_bPct > smart_rPct ? "MILD BULL" : "MILD BEAR"
+
+color smart_biasCol =
+     smart_biasTxt == "STRONG BULL" ? color.green :
+     smart_biasTxt == "STRONG BEAR" ? color.red : color.gray
+
+// ── Trade state (persisted)
+var int   smart_lastDir = 0
+var float smart_entryPx = 0.0
+var float smart_slPx    = 0.0
+var float smart_tp1Px   = 0.0
+var float smart_tp2Px   = 0.0
+var float smart_tp3Px   = 0.0
+var float smart_tp4Px   = 0.0
+var float smart_tp5Px   = 0.0
+
+var bool smart_tp1Hit = false
+var bool smart_tp2Hit = false
+var bool smart_tp3Hit = false
+var bool smart_tp4Hit = false
+var bool smart_tp5Hit = false
+
+// ── Signal triggers (EMA cross)
+smart_buyFlip  = ta.crossover(leo_emaFast, leo_emaSlow)
+smart_sellFlip = ta.crossunder(leo_emaFast, leo_emaSlow)
+
+smart_triggerBuy  = smart_buyFlip and smart_lastDir <= 0
+smart_triggerSell = smart_sellFlip and smart_lastDir >= 0
+
+if smart_triggerBuy or smart_triggerSell
+    // Direction & prices
+    smart_lastDir := smart_triggerBuy ? 1 : -1
+    smart_entryPx := close
+
+    float smart_risk = leo_atr * leo_atrMult
+    // SL only: widen by +50% (TP logic remains tied to original risk)
+    float smart_slRisk = smart_risk * 1.5
+    smart_slPx := smart_triggerBuy ? (smart_entryPx - smart_slRisk) : (smart_entryPx + smart_slRisk)
+
+    smart_tp1Px := smart_triggerBuy ? (smart_entryPx + smart_risk) : (smart_entryPx - smart_risk)
+    smart_tp2Px := smart_triggerBuy ? (smart_entryPx + (smart_risk * 2.0)) : (smart_entryPx - (smart_risk * 2.0))
+    smart_tp3Px := smart_triggerBuy ? (smart_entryPx + (smart_risk * 3.0)) : (smart_entryPx - (smart_risk * 3.0))
+    smart_tp4Px := smart_triggerBuy ? (smart_entryPx + (smart_risk * 4.0)) : (smart_entryPx - (smart_risk * 4.0))
+    smart_tp5Px := smart_triggerBuy ? (smart_entryPx + (smart_risk * 5.0)) : (smart_entryPx - (smart_risk * 5.0))
+
+    // Reset hit trackers
+    smart_tp1Hit := false
+    smart_tp2Hit := false
+    smart_tp3Hit := false
+    smart_tp4Hit := false
+    smart_tp5Hit := false
+
+// ── Target hit detection (same bar high/low logic; no lookahead)
+if smart_lastDir == 1
+    if high >= smart_tp1Px
+        smart_tp1Hit := true
+    if high >= smart_tp2Px
+        smart_tp2Hit := true
+    if high >= smart_tp3Px
+        smart_tp3Hit := true
+    if high >= smart_tp4Px
+        smart_tp4Hit := true
+    if high >= smart_tp5Px
+        smart_tp5Hit := true
+
+if smart_lastDir == -1
+    if low <= smart_tp1Px
+        smart_tp1Hit := true
+    if low <= smart_tp2Px
+        smart_tp2Hit := true
+    if low <= smart_tp3Px
+        smart_tp3Hit := true
+    if low <= smart_tp4Px
+        smart_tp4Hit := true
+    if low <= smart_tp5Px
+        smart_tp5Hit := true
+
+// ── Dashboard table
+var table leo_tbl = table.new(position.middle_left, 2, 17, bgcolor=color.new(#FFF9C4, 10), border_width=1, border_color=color.new(color.gray, 60))
+
+if barstate.islast
+    table.cell(leo_tbl, 0, 0, "BULL SCORE", text_color=color.white, bgcolor=color.green, text_size=leo_dashSize)
+    table.cell(leo_tbl, 1, 0, str.tostring(smart_bPct, "#") + "%", text_color=color.white, bgcolor=color.green, text_size=leo_dashSize)
+
+    table.cell(leo_tbl, 0, 1, "BEAR SCORE", text_color=color.white, bgcolor=color.red, text_size=leo_dashSize)
+    table.cell(leo_tbl, 1, 1, str.tostring(smart_rPct, "#") + "%", text_color=color.white, bgcolor=color.red, text_size=leo_dashSize)
+
+    table.cell(leo_tbl, 0, 2, "MARKET BIAS", text_color=color.white, bgcolor=color.black, text_size=leo_dashSize)
+    table.cell(leo_tbl, 1, 2, smart_biasTxt, text_color=color.white, bgcolor=smart_biasCol, text_size=leo_dashSize)
+
+    leo_putRow(leo_tbl, 3, "Price/VWAP", close > leo_vwap ? "ABOVE" : "BELOW", close > leo_vwap ? color.green : color.red)
+    leo_putRow(leo_tbl, 4, "RSI (14)", str.tostring(leo_rsi14, "#.#"), leo_rsi14 > 50 ? color.green : color.red)
+    leo_putRow(leo_tbl, 5, "MACD Trend", leo_macdMain > leo_macdSig ? "BULL" : "BEAR", leo_macdMain > leo_macdSig ? color.green : color.red)
+    leo_putRow(leo_tbl, 6, "ADX Power", str.tostring(leo_adx, "#.#"), leo_adx > 25 ? color.green : color.gray)
+    leo_putRow(leo_tbl, 7, "EMA Cross", leo_emaFast > leo_emaSlow ? "BULL" : "BEAR", leo_emaFast > leo_emaSlow ? color.green : color.red)
+    leo_putRow(leo_tbl, 8, "ATR 14", str.tostring(leo_atr, "#.##"), color.black)
+    leo_putRow(leo_tbl, 9, "Vol Status", volume > leo_volAvg ? "HIGH" : "LOW", volume > leo_volAvg ? color.green : color.gray)
+    leo_putRow(leo_tbl, 10, "5m RSI", str.tostring(leo_rsi5m, "#.#"), leo_rsi5m > 50 ? color.green : color.red)
+    leo_putRow(leo_tbl, 11, "MACD Main", str.tostring(leo_macdMain, "#.##"), color.black)
+    leo_putRow(leo_tbl, 12, "MACD Sig", str.tostring(leo_macdSig, "#.##"), color.black)
+    leo_putRow(leo_tbl, 13, "Trend Str", leo_adx > 25 ? "STRONG" : "WEAK", leo_adx > 25 ? color.green : color.red)
+    leo_putRow(leo_tbl, 14, "Status", (smart_triggerBuy or smart_triggerSell) ? "NEW" : "WAIT", color.black)
+    leo_putRow(leo_tbl, 15, "Sniper Mode", "Leo524 Pro", color.blue)
+
+// ── Ribbon plots
+leo_pFast = plot(leo_emaFast, color=color.new(color.green, 20), title="EMA 9")
+leo_pSlow = plot(leo_emaSlow, color=color.new(color.red, 20), title="EMA 21")
+fill(leo_pFast, leo_pSlow, color=leo_emaFast > leo_emaSlow ? color.new(color.green, 100 - leo_ribbonAlpha) : color.new(color.red, 100 - leo_ribbonAlpha))
+
+// ── Candle colors + buy/sell markers
+leo_isRetest =
+     (smart_lastDir == 1 and low <= leo_emaFast and low > leo_emaSlow) or
+     (smart_lastDir == -1 and high >= leo_emaFast and high < leo_emaSlow)
+
+barcolor((smart_triggerBuy or smart_triggerSell) ? color.black : leo_isRetest ? color.orange : na)
+
+plotshape(smart_triggerBuy, text="BUY", style=shape.labelup, location=location.belowbar, color=color.green, textcolor=color.white, size=size.small)
+plotshape(smart_triggerSell, text="SELL", style=shape.labeldown, location=location.abovebar, color=color.red, textcolor=color.white, size=size.small)
+
+// ── SL/TP lines + labels
+var line leo_lEntry = na
+var line leo_lSL    = na
+var line leo_lT1    = na
+var line leo_lT2    = na
+var line leo_lT3    = na
+var line leo_lT4    = na
+var line leo_lT5    = na
+
+var label leo_lbEntry = label.new(na, na, "", color=color.blue, textcolor=color.white, style=label.style_label_left, size=leo_tradeSize)
+var label leo_lbT1    = label.new(na, na, "", color=color.green, textcolor=color.white, style=label.style_label_left, size=leo_tradeSize)
+var label leo_lbT2    = label.new(na, na, "", color=color.green, textcolor=color.white, style=label.style_label_left, size=leo_tradeSize)
+var label leo_lbT3    = label.new(na, na, "", color=color.green, textcolor=color.white, style=label.style_label_left, size=leo_tradeSize)
+var label leo_lbT4    = label.new(na, na, "", color=color.rgb(0, 100, 0), textcolor=color.white, style=label.style_label_left, size=leo_tradeSize)
+var label leo_lbT5    = label.new(na, na, "", color=color.rgb(0, 70, 0), textcolor=color.white, style=label.style_label_left, size=leo_tradeSize)
+
+if smart_triggerBuy or smart_triggerSell
+    line.delete(leo_lEntry)
+    line.delete(leo_lSL)
+    line.delete(leo_lT1)
+    line.delete(leo_lT2)
+    line.delete(leo_lT3)
+    line.delete(leo_lT4)
+    line.delete(leo_lT5)
+
+    leo_lEntry := line.new(bar_index, smart_entryPx, bar_index + 20, smart_entryPx, color=color.blue, width=2, extend=extend.right)
+    leo_lSL := line.new(bar_index, smart_slPx, bar_index + 20, smart_slPx, color=color.red, width=2, extend=extend.right)
+
+    leo_lT1 := line.new(bar_index, smart_tp1Px, bar_index + 20, smart_tp1Px, color=color.green, style=line.style_dashed, extend=extend.right)
+    leo_lT2 := line.new(bar_index, smart_tp2Px, bar_index + 20, smart_tp2Px, color=color.green, style=line.style_dashed, extend=extend.right)
+    leo_lT3 := line.new(bar_index, smart_tp3Px, bar_index + 20, smart_tp3Px, color=color.green, style=line.style_dashed, extend=extend.right)
+    leo_lT4 := line.new(bar_index, smart_tp4Px, bar_index + 20, smart_tp4Px, color=color.rgb(0, 100, 0), width=2, extend=extend.right)
+    leo_lT5 := line.new(bar_index, smart_tp5Px, bar_index + 20, smart_tp5Px, color=color.rgb(0, 70, 0), width=3, extend=extend.right)
+
+if smart_lastDir != 0
+    int leo_xLab = bar_index + leo_rightBars
+
+    line.set_color(leo_lT1, smart_tp1Hit ? leo_turq : color.green)
+    line.set_color(leo_lT2, smart_tp2Hit ? leo_turq : color.green)
+    line.set_color(leo_lT3, smart_tp3Hit ? leo_turq : color.green)
+    line.set_color(leo_lT4, smart_tp4Hit ? leo_turq : color.rgb(0, 100, 0))
+    line.set_color(leo_lT5, smart_tp5Hit ? leo_turq : color.rgb(0, 70, 0))
+
+    label.set_xy(leo_lbEntry, leo_xLab, smart_entryPx)
+    label.set_text(leo_lbEntry, "ENTRY: " + str.tostring(smart_entryPx, "#.##"))
+
+    label.set_xy(leo_lbT1, leo_xLab, smart_tp1Px)
+    label.set_text(leo_lbT1, "TP1: " + str.tostring(smart_tp1Px, "#.##") + (smart_tp1Hit ? " 🔥" : ""))
+
+    label.set_xy(leo_lbT2, leo_xLab, smart_tp2Px)
+    label.set_text(leo_lbT2, "TP2: " + str.tostring(smart_tp2Px, "#.##") + (smart_tp2Hit ? " 🔥" : ""))
+
+    label.set_xy(leo_lbT3, leo_xLab, smart_tp3Px)
+    label.set_text(leo_lbT3, "TP3: " + str.tostring(smart_tp3Px, "#.##") + (smart_tp3Hit ? " 🔥" : ""))
+
+    label.set_xy(leo_lbT4, leo_xLab, smart_tp4Px)
+    label.set_text(leo_lbT4, "TP4: " + str.tostring(smart_tp4Px, "#.##") + (smart_tp4Hit ? " 🔥" : ""))
+
+    label.set_xy(leo_lbT5, leo_xLab, smart_tp5Px)
+    label.set_text(leo_lbT5, "TP5: " + str.tostring(smart_tp5Px, "#.##") + (smart_tp5Hit ? " 🔥" : ""))
+
+// ── VWAP plot (matching original appearance)
+plot(leo_vwap, color=close > leo_vwap ? color.green : color.red, linewidth=2, title="VWAP")
+
